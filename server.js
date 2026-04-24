@@ -71,7 +71,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: '100% Halal AI Trading Bot - Demo + Real Trading' });
+    res.json({ status: 'ok', message: '100% Halal AI Trading Bot' });
 });
 
 // ==================== AUTHENTICATION ====================
@@ -163,17 +163,22 @@ app.post('/api/admin/toggle-block', authenticate, (req, res) => {
     res.json({ success: true, message: `User ${email} is now ${users[email].isBlocked ? 'blocked' : 'unblocked'}.` });
 });
 
-// ==================== HALAL BINANCE API (REAL + DEMO TRADING) ====================
+// ==================== BINANCE API - CORRECT ENDPOINTS ====================
 function cleanKey(key) {
     if (!key) return "";
     return key.replace(/[\s\n\r\t]+/g, '').trim();
 }
 
 async function getServerTime(useDemo = false) {
-    // Demo Trading uses the same API endpoint as real Binance
-    const baseUrl = 'https://api.binance.com';
-    const response = await axios.get(`${baseUrl}/api/v3/time`, { timeout: 5000 });
-    return response.data.serverTime;
+    // CORRECT: Demo Trading uses demo-api.binance.com
+    const baseUrl = useDemo ? 'https://demo-api.binance.com' : 'https://api.binance.com';
+    try {
+        const response = await axios.get(`${baseUrl}/api/v3/time`, { timeout: 5000 });
+        return response.data.serverTime;
+    } catch (error) {
+        console.log('Time sync error:', error.message);
+        return Date.now();
+    }
 }
 
 function generateSignature(queryString, secret) {
@@ -186,8 +191,8 @@ async function binanceRequest(apiKey, secretKey, endpoint, params = {}, method =
     const sortedKeys = Object.keys(allParams).sort();
     const queryString = sortedKeys.map(k => `${k}=${allParams[k]}`).join('&');
     const signature = generateSignature(queryString, secretKey);
-    // IMPORTANT: Demo Trading uses the same API endpoint as real Binance
-    const baseUrl = 'https://api.binance.com';
+    // CORRECT: Demo API endpoint
+    const baseUrl = useDemo ? 'https://demo-api.binance.com' : 'https://api.binance.com';
     const url = `${baseUrl}${endpoint}?${queryString}&signature=${signature}`;
     const response = await axios({
         method,
@@ -198,25 +203,23 @@ async function binanceRequest(apiKey, secretKey, endpoint, params = {}, method =
     return response.data;
 }
 
-// Get Spot Wallet Balance (works for both Real and Demo)
 async function getSpotBalance(apiKey, secretKey, useDemo = false) {
     try {
         const accountData = await binanceRequest(apiKey, secretKey, '/api/v3/account', {}, 'GET', useDemo);
         const usdtBalance = accountData.balances.find(b => b.asset === 'USDT');
         return parseFloat(usdtBalance?.free || 0);
     } catch (error) {
-        console.error('Spot balance fetch error:', error.response?.data || error.message);
+        console.error('Balance fetch error:', error.response?.data || error.message);
         return 0;
     }
 }
 
-// Get Funding Wallet Balance (may not work for Demo)
 async function getFundingBalance(apiKey, secretKey, useDemo = false) {
     try {
         const timestamp = await getServerTime(useDemo);
         const queryString = `timestamp=${timestamp}`;
         const signature = generateSignature(queryString, secretKey);
-        const baseUrl = 'https://api.binance.com';
+        const baseUrl = useDemo ? 'https://demo-api.binance.com' : 'https://api.binance.com';
         const url = `${baseUrl}/sapi/v1/asset/get-funding-asset?${queryString}&signature=${signature}`;
         const response = await axios({
             method: 'POST',
@@ -227,13 +230,12 @@ async function getFundingBalance(apiKey, secretKey, useDemo = false) {
         const usdtAsset = response.data.find(asset => asset.asset === 'USDT');
         return parseFloat(usdtAsset?.free || 0);
     } catch (error) {
-        console.log('Funding wallet not accessible (Demo mode may not support this)');
         return 0;
     }
 }
 
 async function getCurrentPrice(symbol, useDemo = false) {
-    const baseUrl = 'https://api.binance.com';
+    const baseUrl = useDemo ? 'https://demo-api.binance.com' : 'https://api.binance.com';
     const response = await axios.get(`${baseUrl}/api/v3/ticker/price?symbol=${symbol}`);
     return parseFloat(response.data.price);
 }
@@ -256,7 +258,7 @@ app.post('/api/set-api-keys', authenticate, async (req, res) => {
     if (!apiKey || !secretKey) return res.status(400).json({ success: false, message: 'Both keys required' });
     const cleanApi = cleanKey(apiKey);
     const cleanSecret = cleanKey(secretKey);
-    const useDemo = (accountType === 'testnet'); // Demo mode uses same as testnet option
+    const useDemo = (accountType === 'testnet');
     
     try {
         const spotBalance = await getSpotBalance(cleanApi, cleanSecret, useDemo);
@@ -266,7 +268,7 @@ app.post('/api/set-api-keys', authenticate, async (req, res) => {
         users[req.user.email].secretKey = encrypt(cleanSecret);
         writeUsers(users);
         
-        const mode = useDemo ? 'Demo Trading' : 'Halal Spot Trading';
+        const mode = useDemo ? 'Demo Trading' : 'Real Binance';
         res.json({ 
             success: true, 
             message: `${mode} API keys saved! Spot: ${spotBalance} USDT | Funding: ${fundingBalance} USDT`, 
@@ -297,7 +299,7 @@ app.post('/api/connect-binance', authenticate, async (req, res) => {
     try {
         const spotBalance = await getSpotBalance(apiKey, secretKey, useDemo);
         const fundingBalance = await getFundingBalance(apiKey, secretKey, useDemo);
-        const mode = useDemo ? 'Demo Trading' : 'Halal Spot Trading';
+        const mode = useDemo ? 'Demo Trading' : 'Real Binance';
         res.json({ 
             success: true, 
             spotBalance: spotBalance, 
@@ -350,7 +352,7 @@ app.get('/api/admin/user-balances', authenticate, async (req, res) => {
     res.json({ success: true, balances });
 });
 
-// ==================== HALAL TRADING ENGINE WITH COMPOUNDING ====================
+// ==================== HALAL TRADING ENGINE ====================
 const activeTradingSessions = {};
 
 class HalalTradingEngine {
@@ -486,9 +488,6 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
         if (balance < initialInvestment) {
             return res.status(400).json({ success: false, message: `Insufficient spot balance. You have ${balance} USDT, need ${initialInvestment}` });
         }
-        if (!useDemo && balance < 10) {
-            return res.status(400).json({ success: false, message: `Halal trading requires minimum 10 USDT in spot wallet. You have ${balance} USDT.` });
-        }
     } catch (error) {
         return res.status(401).json({ success: false, message: 'Failed to verify balance. Check API keys.' });
     }
@@ -529,7 +528,7 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
     
     activeTradingSessions[sessionId].interval = tradeInterval;
     
-    const mode = useDemo ? 'DEMO' : 'REAL';
+    const mode = useDemo ? 'DEMO (Practice)' : 'REAL';
     res.json({ 
         success: true, 
         sessionId, 
@@ -631,9 +630,8 @@ app.get('*', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🕋 100% HALAL AI TRADING BOT`);
     console.log(`✅ Owner: mujtabahatif@gmail.com / Mujtabah@2598`);
-    console.log(`✅ Real + Demo Trading support (both use same API)`);
-    console.log(`✅ Spot + Funding wallet balances available`);
-    console.log(`✅ Halal compounding: +2% position size per win streak (max +20%)`);
-    console.log(`✅ Minimum balance: 10 USDT in spot wallet`);
+    console.log(`✅ Real API: api.binance.com`);
+    console.log(`✅ Demo API: demo-api.binance.com (for practice)`);
+    console.log(`✅ Halal compounding: +2% position size per win streak`);
     console.log(`✅ Server running on port: ${PORT}`);
 });
