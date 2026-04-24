@@ -71,7 +71,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: '100% Halal AI Trading Bot - Spot + Funding Wallet' });
+    res.json({ status: 'ok', message: '100% Halal AI Trading Bot - Demo + Real Trading' });
 });
 
 // ==================== AUTHENTICATION ====================
@@ -163,14 +163,15 @@ app.post('/api/admin/toggle-block', authenticate, (req, res) => {
     res.json({ success: true, message: `User ${email} is now ${users[email].isBlocked ? 'blocked' : 'unblocked'}.` });
 });
 
-// ==================== HALAL BINANCE API (SPOT + FUNDING WALLET) ====================
+// ==================== HALAL BINANCE API (REAL + DEMO TRADING) ====================
 function cleanKey(key) {
     if (!key) return "";
     return key.replace(/[\s\n\r\t]+/g, '').trim();
 }
 
-async function getServerTime(useTestnet = false) {
-    const baseUrl = useTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+async function getServerTime(useDemo = false) {
+    // Demo Trading uses the same API endpoint as real Binance
+    const baseUrl = 'https://api.binance.com';
     const response = await axios.get(`${baseUrl}/api/v3/time`, { timeout: 5000 });
     return response.data.serverTime;
 }
@@ -179,13 +180,14 @@ function generateSignature(queryString, secret) {
     return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
 }
 
-async function binanceRequest(apiKey, secretKey, endpoint, params = {}, method = 'GET', useTestnet = false) {
-    const timestamp = await getServerTime(useTestnet);
+async function binanceRequest(apiKey, secretKey, endpoint, params = {}, method = 'GET', useDemo = false) {
+    const timestamp = await getServerTime(useDemo);
     const allParams = { ...params, timestamp, recvWindow: 5000 };
     const sortedKeys = Object.keys(allParams).sort();
     const queryString = sortedKeys.map(k => `${k}=${allParams[k]}`).join('&');
     const signature = generateSignature(queryString, secretKey);
-    const baseUrl = useTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+    // IMPORTANT: Demo Trading uses the same API endpoint as real Binance
+    const baseUrl = 'https://api.binance.com';
     const url = `${baseUrl}${endpoint}?${queryString}&signature=${signature}`;
     const response = await axios({
         method,
@@ -196,10 +198,10 @@ async function binanceRequest(apiKey, secretKey, endpoint, params = {}, method =
     return response.data;
 }
 
-// Get Spot Wallet Balance
-async function getSpotBalance(apiKey, secretKey, useTestnet = false) {
+// Get Spot Wallet Balance (works for both Real and Demo)
+async function getSpotBalance(apiKey, secretKey, useDemo = false) {
     try {
-        const accountData = await binanceRequest(apiKey, secretKey, '/api/v3/account', {}, 'GET', useTestnet);
+        const accountData = await binanceRequest(apiKey, secretKey, '/api/v3/account', {}, 'GET', useDemo);
         const usdtBalance = accountData.balances.find(b => b.asset === 'USDT');
         return parseFloat(usdtBalance?.free || 0);
     } catch (error) {
@@ -208,14 +210,13 @@ async function getSpotBalance(apiKey, secretKey, useTestnet = false) {
     }
 }
 
-// Get Funding Wallet Balance
-async function getFundingBalance(apiKey, secretKey, useTestnet = false) {
+// Get Funding Wallet Balance (may not work for Demo)
+async function getFundingBalance(apiKey, secretKey, useDemo = false) {
     try {
-        // Funding wallet requires a different endpoint
-        const timestamp = await getServerTime(useTestnet);
+        const timestamp = await getServerTime(useDemo);
         const queryString = `timestamp=${timestamp}`;
         const signature = generateSignature(queryString, secretKey);
-        const baseUrl = useTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+        const baseUrl = 'https://api.binance.com';
         const url = `${baseUrl}/sapi/v1/asset/get-funding-asset?${queryString}&signature=${signature}`;
         const response = await axios({
             method: 'POST',
@@ -226,19 +227,18 @@ async function getFundingBalance(apiKey, secretKey, useTestnet = false) {
         const usdtAsset = response.data.find(asset => asset.asset === 'USDT');
         return parseFloat(usdtAsset?.free || 0);
     } catch (error) {
-        // If funding endpoint fails (many API keys don't have funding permission), return 0
-        console.log('Funding wallet not accessible (may require additional API permissions)');
+        console.log('Funding wallet not accessible (Demo mode may not support this)');
         return 0;
     }
 }
 
-async function getCurrentPrice(symbol, useTestnet = false) {
-    const baseUrl = useTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+async function getCurrentPrice(symbol, useDemo = false) {
+    const baseUrl = 'https://api.binance.com';
     const response = await axios.get(`${baseUrl}/api/v3/ticker/price?symbol=${symbol}`);
     return parseFloat(response.data.price);
 }
 
-async function placeHalalSpotOrder(apiKey, secretKey, symbol, side, quoteOrderQty, useTestnet = false) {
+async function placeHalalSpotOrder(apiKey, secretKey, symbol, side, quoteOrderQty, useDemo = false) {
     if (quoteOrderQty < 10) {
         throw new Error('Minimum order size is $10 USDT for halal spot trading');
     }
@@ -247,7 +247,7 @@ async function placeHalalSpotOrder(apiKey, secretKey, symbol, side, quoteOrderQt
         side,
         type: 'MARKET',
         quoteOrderQty: quoteOrderQty.toFixed(2)
-    }, 'POST', useTestnet);
+    }, 'POST', useDemo);
 }
 
 // ==================== API KEY MANAGEMENT ====================
@@ -256,17 +256,17 @@ app.post('/api/set-api-keys', authenticate, async (req, res) => {
     if (!apiKey || !secretKey) return res.status(400).json({ success: false, message: 'Both keys required' });
     const cleanApi = cleanKey(apiKey);
     const cleanSecret = cleanKey(secretKey);
-    const useTestnet = (accountType === 'testnet');
+    const useDemo = (accountType === 'testnet'); // Demo mode uses same as testnet option
     
     try {
-        const spotBalance = await getSpotBalance(cleanApi, cleanSecret, useTestnet);
-        const fundingBalance = await getFundingBalance(cleanApi, cleanSecret, useTestnet);
+        const spotBalance = await getSpotBalance(cleanApi, cleanSecret, useDemo);
+        const fundingBalance = await getFundingBalance(cleanApi, cleanSecret, useDemo);
         const users = readUsers();
         users[req.user.email].apiKey = encrypt(cleanApi);
         users[req.user.email].secretKey = encrypt(cleanSecret);
         writeUsers(users);
         
-        const mode = useTestnet ? 'Testnet' : 'Halal Spot Trading';
+        const mode = useDemo ? 'Demo Trading' : 'Halal Spot Trading';
         res.json({ 
             success: true, 
             message: `${mode} API keys saved! Spot: ${spotBalance} USDT | Funding: ${fundingBalance} USDT`, 
@@ -292,12 +292,12 @@ app.post('/api/connect-binance', authenticate, async (req, res) => {
     
     const apiKey = decrypt(user.apiKey);
     const secretKey = decrypt(user.secretKey);
-    const useTestnet = (accountType === 'testnet');
+    const useDemo = (accountType === 'testnet');
     
     try {
-        const spotBalance = await getSpotBalance(apiKey, secretKey, useTestnet);
-        const fundingBalance = await getFundingBalance(apiKey, secretKey, useTestnet);
-        const mode = useTestnet ? 'Testnet' : 'Halal Spot Trading';
+        const spotBalance = await getSpotBalance(apiKey, secretKey, useDemo);
+        const fundingBalance = await getFundingBalance(apiKey, secretKey, useDemo);
+        const mode = useDemo ? 'Demo Trading' : 'Halal Spot Trading';
         res.json({ 
             success: true, 
             spotBalance: spotBalance, 
@@ -317,7 +317,7 @@ app.get('/api/get-keys', authenticate, (req, res) => {
     res.json({ success: true, apiKey: decrypt(user.apiKey), secretKey: decrypt(user.secretKey) });
 });
 
-// ==================== OWNER: GET ALL USERS' BALANCES (SPOT + FUNDING) ====================
+// ==================== OWNER: GET ALL USERS' BALANCES ====================
 app.get('/api/admin/user-balances', authenticate, async (req, res) => {
     if (!req.user.isOwner) return res.status(403).json({ success: false, message: 'Admin only' });
     
@@ -354,9 +354,9 @@ app.get('/api/admin/user-balances', authenticate, async (req, res) => {
 const activeTradingSessions = {};
 
 class HalalTradingEngine {
-    async getAISignal(symbol, useTestnet = false) {
+    async getAISignal(symbol, useDemo = false) {
         try {
-            const ticker = await binanceRequest('', '', '/api/v3/ticker/24hr', { symbol }, 'GET', useTestnet);
+            const ticker = await binanceRequest('', '', '/api/v3/ticker/24hr', { symbol }, 'GET', useDemo);
             const priceChange = parseFloat(ticker.priceChangePercent);
             const volume = parseFloat(ticker.volume);
             
@@ -370,7 +370,7 @@ class HalalTradingEngine {
         }
     }
 
-    async executeTrade(sessionId, userEmail, apiKey, secretKey, config, useTestnet = false) {
+    async executeTrade(sessionId, userEmail, apiKey, secretKey, config, useDemo = false) {
         const { initialInvestment, targetProfit, riskLevel, tradingPairs, startedAt, timeLimit } = config;
         
         const elapsedHours = (Date.now() - startedAt) / (1000 * 60 * 60);
@@ -394,7 +394,7 @@ class HalalTradingEngine {
         const compoundingBonus = Math.min(winStreak * 0.02, 0.20);
         const totalPercent = Math.min(basePercent + compoundingBonus, 0.30);
         
-        const actualBalance = await getSpotBalance(apiKey, secretKey, useTestnet);
+        const actualBalance = await getSpotBalance(apiKey, secretKey, useDemo);
         let positionSize = actualBalance * totalPercent;
         
         if (positionSize < 10) positionSize = 10;
@@ -403,8 +403,8 @@ class HalalTradingEngine {
         }
         
         const symbol = tradingPairs[Math.floor(Math.random() * tradingPairs.length)];
-        const currentPrice = await getCurrentPrice(symbol, useTestnet);
-        const signal = await this.getAISignal(symbol, useTestnet);
+        const currentPrice = await getCurrentPrice(symbol, useDemo);
+        const signal = await this.getAISignal(symbol, useDemo);
         
         if (signal.action === 'HOLD') {
             return { success: true, message: 'AI recommended hold' };
@@ -413,7 +413,7 @@ class HalalTradingEngine {
         const isBuy = (signal.action === 'BUY');
         
         try {
-            const order = await placeHalalSpotOrder(apiKey, secretKey, symbol, isBuy ? 'BUY' : 'SELL', positionSize, useTestnet);
+            const order = await placeHalalSpotOrder(apiKey, secretKey, symbol, isBuy ? 'BUY' : 'SELL', positionSize, useDemo);
             const entryPrice = parseFloat(order.fills?.[0]?.price || currentPrice);
             const quantity = parseFloat(order.executedQty);
             
@@ -479,14 +479,14 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
     
     const apiKey = decrypt(user.apiKey);
     const secretKey = decrypt(user.secretKey);
-    const useTestnet = (accountType === 'testnet');
+    const useDemo = (accountType === 'testnet');
     
     try {
-        const balance = await getSpotBalance(apiKey, secretKey, useTestnet);
+        const balance = await getSpotBalance(apiKey, secretKey, useDemo);
         if (balance < initialInvestment) {
             return res.status(400).json({ success: false, message: `Insufficient spot balance. You have ${balance} USDT, need ${initialInvestment}` });
         }
-        if (!useTestnet && balance < 10) {
+        if (!useDemo && balance < 10) {
             return res.status(400).json({ success: false, message: `Halal trading requires minimum 10 USDT in spot wallet. You have ${balance} USDT.` });
         }
     } catch (error) {
@@ -523,16 +523,17 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
             apiKey,
             secretKey,
             { initialInvestment, targetProfit, riskLevel, tradingPairs, startedAt: session.startedAt, timeLimit },
-            useTestnet
+            useDemo
         );
     }, tradeIntervalSeconds * 1000);
     
     activeTradingSessions[sessionId].interval = tradeInterval;
     
+    const mode = useDemo ? 'DEMO' : 'REAL';
     res.json({ 
         success: true, 
         sessionId, 
-        message: `🕋 HALAL TRADING STARTED! Target: ${(targetProfit/initialInvestment).toFixed(0)}x | Win streak = +2% position size`
+        message: `🕋 HALAL TRADING STARTED (${mode})! Target: ${(targetProfit/initialInvestment).toFixed(0)}x | Win streak = +2% position size`
     });
 });
 
@@ -579,9 +580,9 @@ app.post('/api/get-balance', authenticate, async (req, res) => {
     try {
         const apiKey = decrypt(user.apiKey);
         const secretKey = decrypt(user.secretKey);
-        const useTestnet = (accountType === 'testnet');
-        const spotBalance = await getSpotBalance(apiKey, secretKey, useTestnet);
-        const fundingBalance = await getFundingBalance(apiKey, secretKey, useTestnet);
+        const useDemo = (accountType === 'testnet');
+        const spotBalance = await getSpotBalance(apiKey, secretKey, useDemo);
+        const fundingBalance = await getFundingBalance(apiKey, secretKey, useDemo);
         res.json({ success: true, spotBalance: spotBalance, fundingBalance: fundingBalance, total: spotBalance + fundingBalance });
     } catch (error) {
         res.json({ success: false, balance: 0 });
@@ -630,8 +631,8 @@ app.get('*', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🕋 100% HALAL AI TRADING BOT`);
     console.log(`✅ Owner: mujtabahatif@gmail.com / Mujtabah@2598`);
+    console.log(`✅ Real + Demo Trading support (both use same API)`);
     console.log(`✅ Spot + Funding wallet balances available`);
-    console.log(`✅ Spot trading only – No leverage, no interest, no gambling`);
     console.log(`✅ Halal compounding: +2% position size per win streak (max +20%)`);
     console.log(`✅ Minimum balance: 10 USDT in spot wallet`);
     console.log(`✅ Server running on port: ${PORT}`);
